@@ -10,7 +10,6 @@ EXPLICIT_CONFIG=0
 LOG_FILE="browser_installer_$(date +%Y%m%d_%H%M%S).log"
 CONTAINER_NAME="${CONTAINER_NAME:-browser}"
 DEFAULT_SHM_SIZE="2gb"
-DEFAULT_CONFIG_DIR="/opt/${CONTAINER_NAME}"
 IP_FETCH_TIMEOUT=5
 STARTUP_TIMEOUT=180
 INTERACTIVE=0
@@ -57,7 +56,7 @@ Supported config values:
   PORT_GUAC=3000
   PORT_HTTPS=3001
   TIMEZONE=Etc/UTC
-  CONFIG_DIR=/opt/browser
+  CONFIG_DIR=/opt/browser-firefox
   PUID=1000
   PGID=1000
 EOF
@@ -182,7 +181,7 @@ load_config() {
   SHM_SIZE="${SHM_SIZE:-$DEFAULT_SHM_SIZE}"
   PORT_GUAC="${PORT_GUAC:-3000}"
   PORT_HTTPS="${PORT_HTTPS:-3001}"
-  CONFIG_DIR="${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}"
+  CONFIG_DIR="${CONFIG_DIR:-}"
   PUID="${PUID:-1000}"
   PGID="${PGID:-1000}"
 
@@ -203,7 +202,7 @@ load_config() {
   SHM_SIZE="${SHM_SIZE:-$DEFAULT_SHM_SIZE}"
   PORT_GUAC="${PORT_GUAC:-3000}"
   PORT_HTTPS="${PORT_HTTPS:-3001}"
-  CONFIG_DIR="${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}"
+  CONFIG_DIR="${CONFIG_DIR:-}"
   PUID="${PUID:-1000}"
   PGID="${PGID:-1000}"
 }
@@ -299,19 +298,26 @@ set_browser_image() {
     1)
       IMAGE="lscr.io/linuxserver/chromium:latest"
       NAME="Chromium"
+      BROWSER_SLUG="chromium"
       ;;
     2)
       IMAGE="lscr.io/linuxserver/brave:latest"
       NAME="Brave"
+      BROWSER_SLUG="brave"
       ;;
     3)
       IMAGE="lscr.io/linuxserver/firefox:latest"
       NAME="Firefox"
+      BROWSER_SLUG="firefox"
       ;;
     *)
       error "Invalid browser choice: $BROWSER"
       ;;
   esac
+
+  if [[ -z "$CONFIG_DIR" ]]; then
+    CONFIG_DIR="/opt/${CONTAINER_NAME}-${BROWSER_SLUG}"
+  fi
 
   log "Selected browser: $NAME ($IMAGE)"
 }
@@ -471,7 +477,7 @@ wait_for_service() {
     fi
 
     if [[ "$container_state" == "running" ]]; then
-      http_code="$(curl -kLsS -o /dev/null -w '%{http_code}' --max-time 5 "https://127.0.0.1:${PORT_HTTPS}" || true)"
+      http_code="$(curl -kLsS -o /dev/null -w '%{http_code}' --max-time 5 "https://127.0.0.1:${PORT_HTTPS}" 2>/dev/null || true)"
 
       if [[ -n "$http_code" && "$http_code" != "000" ]]; then
         SERVICE_URL="https://127.0.0.1:${PORT_HTTPS}"
@@ -479,7 +485,7 @@ wait_for_service() {
         return
       fi
 
-      http_code="$(curl -LsS -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${PORT_GUAC}" || true)"
+      http_code="$(curl -LsS -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${PORT_GUAC}" 2>/dev/null || true)"
 
       if [[ -n "$http_code" && "$http_code" != "000" ]]; then
         SERVICE_URL="http://127.0.0.1:${PORT_GUAC}"
