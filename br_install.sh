@@ -182,6 +182,7 @@ load_config() {
   PORT_GUAC="${PORT_GUAC:-3000}"
   PORT_HTTPS="${PORT_HTTPS:-3001}"
   CONFIG_DIR="${CONFIG_DIR:-}"
+  DISABLE_IPV6="${DISABLE_IPV6:-}"
   PUID="${PUID:-1000}"
   PGID="${PGID:-1000}"
 
@@ -203,8 +204,16 @@ load_config() {
   PORT_GUAC="${PORT_GUAC:-3000}"
   PORT_HTTPS="${PORT_HTTPS:-3001}"
   CONFIG_DIR="${CONFIG_DIR:-}"
+  DISABLE_IPV6="${DISABLE_IPV6:-}"
   PUID="${PUID:-1000}"
   PGID="${PGID:-1000}"
+
+  if [[ -z "$DISABLE_IPV6" && -r /proc/sys/net/ipv6/conf/all/disable_ipv6 ]]; then
+    if [[ "$(tr -d '[:space:]' </proc/sys/net/ipv6/conf/all/disable_ipv6)" == "1" ]]; then
+      DISABLE_IPV6="true"
+      log "Host IPv6 is disabled. Container IPv6 will be disabled too."
+    fi
+  fi
 }
 
 print_banner() {
@@ -436,23 +445,35 @@ prepare_config_directory() {
 }
 
 run_container() {
+  local -a docker_args
+
   echo
   log "Deploying $NAME browser container..."
 
-  if ! docker run -d \
-    --name "$CONTAINER_NAME" \
-    --security-opt seccomp=unconfined \
-    -e PUID="$PUID" \
-    -e PGID="$PGID" \
-    -e TZ="$TIMEZONE" \
-    -e CUSTOM_USER="$USERNAME" \
-    -e PASSWORD="$PASSWORD" \
-    -p "$PORT_GUAC:3000" \
-    -p "$PORT_HTTPS:3001" \
-    -v "$CONFIG_DIR:/config" \
-    --shm-size="$SHM_SIZE" \
-    --restart unless-stopped \
-    "$IMAGE" 2>&1 | tee -a "$LOG_FILE"; then
+  docker_args=(
+    run
+    -d
+    --name "$CONTAINER_NAME"
+    --security-opt seccomp=unconfined
+    -e PUID="$PUID"
+    -e PGID="$PGID"
+    -e TZ="$TIMEZONE"
+    -e CUSTOM_USER="$USERNAME"
+    -e PASSWORD="$PASSWORD"
+    -p "$PORT_GUAC:3000"
+    -p "$PORT_HTTPS:3001"
+    -v "$CONFIG_DIR:/config"
+    --shm-size="$SHM_SIZE"
+    --restart unless-stopped
+  )
+
+  if [[ -n "${DISABLE_IPV6:-}" ]]; then
+    docker_args+=(-e "DISABLE_IPV6=$DISABLE_IPV6")
+  fi
+
+  docker_args+=("$IMAGE")
+
+  if ! docker "${docker_args[@]}" 2>&1 | tee -a "$LOG_FILE"; then
     error "Failed to start Docker container"
   fi
 
