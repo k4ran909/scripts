@@ -12,9 +12,10 @@ CONTAINER_NAME="${CONTAINER_NAME:-browser}"
 DEFAULT_SHM_SIZE="2gb"
 DEFAULT_CONFIG_DIR="/opt/${CONTAINER_NAME}"
 IP_FETCH_TIMEOUT=5
-STARTUP_TIMEOUT=60
+STARTUP_TIMEOUT=180
 INTERACTIVE=0
 FAILED=0
+SERVICE_URL=""
 
 if [[ -t 0 && -t 1 ]]; then
   INTERACTIVE=1
@@ -115,6 +116,31 @@ install_docker() {
 
   need_cmd docker
   success "Docker installed successfully"
+}
+
+open_firewall_ports() {
+  log "Checking firewall rules for ports ${PORT_GUAC} and ${PORT_HTTPS}..."
+
+  if command -v ufw >/dev/null 2>&1; then
+    if ufw status 2>/dev/null | grep -q "^Status: active"; then
+      ufw allow "${PORT_GUAC}/tcp" >>"$LOG_FILE" 2>&1 || warning "Failed to open ${PORT_GUAC}/tcp in ufw"
+      ufw allow "${PORT_HTTPS}/tcp" >>"$LOG_FILE" 2>&1 || warning "Failed to open ${PORT_HTTPS}/tcp in ufw"
+      success "ufw rules updated"
+      return
+    fi
+  fi
+
+  if command -v firewall-cmd >/dev/null 2>&1; then
+    if firewall-cmd --state >/dev/null 2>&1; then
+      firewall-cmd --permanent --add-port="${PORT_GUAC}/tcp" >>"$LOG_FILE" 2>&1 || warning "Failed to open ${PORT_GUAC}/tcp in firewalld"
+      firewall-cmd --permanent --add-port="${PORT_HTTPS}/tcp" >>"$LOG_FILE" 2>&1 || warning "Failed to open ${PORT_HTTPS}/tcp in firewalld"
+      firewall-cmd --reload >>"$LOG_FILE" 2>&1 || warning "Failed to reload firewalld"
+      success "firewalld rules updated"
+      return
+    fi
+  fi
+
+  warning "No supported active host firewall manager detected. If your VPS provider has a cloud firewall, open TCP ports ${PORT_GUAC} and ${PORT_HTTPS} there too."
 }
 
 validate_positive_integer() {
@@ -253,8 +279,8 @@ prompt_for_browser() {
 
   if (( INTERACTIVE )); then
     while true; do
-      read -r -p "Enter choice (1/2/3) [1]: " BROWSER
-      BROWSER="${BROWSER:-1}"
+      read -r -p "Enter choice (1/2/3) [3]: " BROWSER
+      BROWSER="${BROWSER:-3}"
 
       if [[ "$BROWSER" =~ ^[1-3]$ ]]; then
         break
@@ -263,8 +289,8 @@ prompt_for_browser() {
       warning "Invalid choice. Please enter 1, 2, or 3."
     done
   else
-    warning "Non-interactive mode detected. Defaulting to Chromium."
-    BROWSER="1"
+    warning "Non-interactive mode detected. Defaulting to Firefox."
+    BROWSER="3"
   fi
 }
 
@@ -429,16 +455,35 @@ run_container() {
 
 wait_for_service() {
   local waited=0
+  local container_state=""
   local http_code=""
 
   log "Waiting for browser service to become reachable (max ${STARTUP_TIMEOUT}s)..."
 
   while (( waited < STARTUP_TIMEOUT )); do
-    if docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null | grep -qx "true"; then
+    container_state="$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+
+    if [[ "$container_state" == "exited" || "$container_state" == "dead" ]]; then
+      warning "Container stopped before the web UI became ready."
+      docker ps -a --filter "name=${CONTAINER_NAME}" | tee -a "$LOG_FILE" || true
+      docker logs --tail 50 "$CONTAINER_NAME" 2>&1 | tee -a "$LOG_FILE" || true
+      error "Browser container exited during startup"
+    fi
+
+    if [[ "$container_state" == "running" ]]; then
       http_code="$(curl -kLsS -o /dev/null -w '%{http_code}' --max-time 5 "https://127.0.0.1:${PORT_HTTPS}" || true)"
 
       if [[ -n "$http_code" && "$http_code" != "000" ]]; then
-        success "Browser service is responding on https://127.0.0.1:${PORT_HTTPS}"
+        SERVICE_URL="https://127.0.0.1:${PORT_HTTPS}"
+        success "Browser service is responding on ${SERVICE_URL}"
+        return
+      fi
+
+      http_code="$(curl -LsS -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${PORT_GUAC}" || true)"
+
+      if [[ -n "$http_code" && "$http_code" != "000" ]]; then
+        SERVICE_URL="http://127.0.0.1:${PORT_GUAC}"
+        success "Browser service is responding on ${SERVICE_URL}"
         return
       fi
     fi
@@ -449,7 +494,10 @@ wait_for_service() {
 
   warning "Browser service did not become reachable within ${STARTUP_TIMEOUT}s."
   warning "Recent container logs:"
-  docker logs --tail 30 "$CONTAINER_NAME" 2>&1 | tee -a "$LOG_FILE" >/dev/null || true
+  docker ps -a --filter "name=${CONTAINER_NAME}" | tee -a "$LOG_FILE" || true
+  docker port "$CONTAINER_NAME" | tee -a "$LOG_FILE" || true
+  docker logs --tail 50 "$CONTAINER_NAME" 2>&1 | tee -a "$LOG_FILE" || true
+  error "Browser UI never became reachable on localhost ports ${PORT_GUAC}/${PORT_HTTPS}"
 }
 
 get_public_ip() {
@@ -484,6 +532,7 @@ show_results() {
   echo "======================================="
   echo "Browser      : $NAME"
   echo "Username     : $USERNAME"
+  echo "HTTP URL     : http://$IP:$PORT_GUAC"
   echo "Access URL   : https://$IP:$PORT_HTTPS"
   echo "Guac Port    : $PORT_GUAC"
   echo "Timezone     : $TIMEZONE"
@@ -513,6 +562,7 @@ main() {
   detect_timezone
   check_system_resources
   validate_runtime_settings
+  open_firewall_ports
   remove_old_container
   pull_image
   prepare_config_directory
