@@ -15,6 +15,7 @@ STARTUP_TIMEOUT=180
 INTERACTIVE=0
 FAILED=0
 SERVICE_URL=""
+NETWORK_MODE="${NETWORK_MODE:-bridge}"
 
 if [[ -t 0 && -t 1 ]]; then
   INTERACTIVE=1
@@ -57,6 +58,7 @@ Supported config values:
   PORT_HTTPS=3001
   TIMEZONE=Etc/UTC
   CONFIG_DIR=/opt/browser-firefox
+  NETWORK_MODE=bridge
   PUID=1000
   PGID=1000
 EOF
@@ -183,6 +185,7 @@ load_config() {
   PORT_HTTPS="${PORT_HTTPS:-3001}"
   CONFIG_DIR="${CONFIG_DIR:-}"
   DISABLE_IPV6="${DISABLE_IPV6:-}"
+  NETWORK_MODE="${NETWORK_MODE:-bridge}"
   PUID="${PUID:-1000}"
   PGID="${PGID:-1000}"
 
@@ -205,6 +208,7 @@ load_config() {
   PORT_HTTPS="${PORT_HTTPS:-3001}"
   CONFIG_DIR="${CONFIG_DIR:-}"
   DISABLE_IPV6="${DISABLE_IPV6:-}"
+  NETWORK_MODE="${NETWORK_MODE:-bridge}"
   PUID="${PUID:-1000}"
   PGID="${PGID:-1000}"
 
@@ -410,6 +414,14 @@ validate_runtime_settings() {
   validate_port "$PORT_GUAC" "PORT_GUAC"
   validate_port "$PORT_HTTPS" "PORT_HTTPS"
 
+  case "$NETWORK_MODE" in
+    bridge|host)
+      ;;
+    *)
+      error "NETWORK_MODE must be either 'bridge' or 'host'"
+      ;;
+  esac
+
   [[ "$PORT_GUAC" != "$PORT_HTTPS" ]] || error "PORT_GUAC and PORT_HTTPS must be different"
 
   if port_in_use "$PORT_GUAC"; then
@@ -422,6 +434,13 @@ validate_runtime_settings() {
 
   [[ -n "$SHM_SIZE" ]] || error "SHM_SIZE cannot be empty"
   [[ -n "$CONFIG_DIR" ]] || error "CONFIG_DIR cannot be empty"
+}
+
+container_ports_published() {
+  local ports_json=""
+
+  ports_json="$(docker inspect -f '{{json .NetworkSettings.Ports}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+  [[ "$ports_json" == *"3000/tcp"* || "$ports_json" == *"3001/tcp"* ]]
 }
 
 pull_image() {
@@ -448,7 +467,7 @@ run_container() {
   local -a docker_args
 
   echo
-  log "Deploying $NAME browser container..."
+  log "Deploying $NAME browser container using network mode: $NETWORK_MODE"
 
   docker_args=(
     run
@@ -460,12 +479,19 @@ run_container() {
     -e TZ="$TIMEZONE"
     -e CUSTOM_USER="$USERNAME"
     -e PASSWORD="$PASSWORD"
-    -p "$PORT_GUAC:3000"
-    -p "$PORT_HTTPS:3001"
     -v "$CONFIG_DIR:/config"
     --shm-size="$SHM_SIZE"
     --restart unless-stopped
   )
+
+  if [[ "$NETWORK_MODE" == "host" ]]; then
+    docker_args+=(--network host)
+  else
+    docker_args+=(
+      -p "$PORT_GUAC:3000"
+      -p "$PORT_HTTPS:3001"
+    )
+  fi
 
   if [[ -n "${DISABLE_IPV6:-}" ]]; then
     docker_args+=(-e "DISABLE_IPV6=$DISABLE_IPV6")
@@ -478,6 +504,19 @@ run_container() {
   fi
 
   success "Container started successfully"
+
+  if [[ "$NETWORK_MODE" == "bridge" ]]; then
+    sleep 2
+
+    if ! container_ports_published; then
+      warning "Docker did not publish container ports on this host. Retrying with host networking."
+      docker ps -a --filter "name=${CONTAINER_NAME}" | tee -a "$LOG_FILE" || true
+      docker rm -f "$CONTAINER_NAME" >>"$LOG_FILE" 2>&1 || error "Failed to remove container before host-network retry"
+      NETWORK_MODE="host"
+      run_container
+      return
+    fi
+  fi
 }
 
 wait_for_service() {
@@ -565,6 +604,7 @@ show_results() {
   echo "Timezone     : $TIMEZONE"
   echo "Config Dir   : $CONFIG_DIR"
   echo "Container    : $CONTAINER_NAME"
+  echo "Network Mode : $NETWORK_MODE"
   echo
   echo "Note: Accept the browser SSL warning on first load."
   echo "Log file     : $LOG_FILE"
