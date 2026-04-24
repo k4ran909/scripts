@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  Browser VPS Installer v2.1
+#  Browser VPS Installer v2.2
 #  One-line install: bash <(curl -fsSL https://raw.githubusercontent.com/k4ran909/scripts/main/br_install.sh)
 #
 #  Deploys a 24/7 desktop browser (KasmVNC) accessible from anywhere.
 #  Supports: Chromium, Brave, Firefox, Mullvad Browser, Opera
+#  Optional: Custom domain + free SSL via Caddy reverse proxy
 # ============================================================================
 set -Eeuo pipefail
 
@@ -30,6 +31,8 @@ STARTUP_TIMEOUT=180
 IP_FETCH_TIMEOUT=5
 INTERACTIVE=0
 FAILED=0
+DOMAIN="${DOMAIN:-}"
+USE_DNS=0
 
 [[ -t 0 && -t 1 ]] && INTERACTIVE=1
 
@@ -51,7 +54,7 @@ trap cleanup EXIT
 # ── Help ───────────────────────────────────────────────────────────────────
 show_help() {
   cat <<EOF
-${BOLD}Browser VPS Installer v2.1${NC}
+${BOLD}Browser VPS Installer v2.2${NC}
 
 ${BOLD}Usage:${NC}
   $SCRIPT_NAME                        Interactive install
@@ -74,6 +77,7 @@ ${BOLD}Config file / environment variables:${NC}
   PUID=1000
   PGID=1000
   WATCHTOWER=yes       (yes or no — auto-update images)
+  DOMAIN=browser.example.com  (optional — custom domain with free SSL)
 EOF
   exit 0
 }
@@ -110,7 +114,7 @@ banner() {
   cat <<'ART'
 
   ╔══════════════════════════════════════════════════╗
-  ║       🌐  Browser VPS Installer  v2.1  🌐       ║
+  ║       🌐  Browser VPS Installer  v2.2  🌐       ║
   ║    Deploy a 24/7 browser accessible anywhere     ║
   ╚══════════════════════════════════════════════════╝
 
@@ -315,17 +319,25 @@ validate_ports() {
 open_firewall() {
   log "Configuring firewall …"
 
+  # Collect all ports to open
+  local -a ports=("$PORT_HTTP" "$PORT_HTTPS")
+  if (( USE_DNS )); then
+    ports+=(80 443)
+  fi
+
   if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "active"; then
-    ufw allow "$PORT_HTTP/tcp" >>"$LOG_FILE" 2>&1 || true
-    ufw allow "$PORT_HTTPS/tcp" >>"$LOG_FILE" 2>&1 || true
-    ok "UFW: ports $PORT_HTTP & $PORT_HTTPS opened"
+    for p in "${ports[@]}"; do
+      ufw allow "${p}/tcp" >>"$LOG_FILE" 2>&1 || true
+    done
+    ok "UFW: ports ${ports[*]} opened"
   elif command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null 2>&1; then
-    firewall-cmd --permanent --add-port="$PORT_HTTP/tcp" >>"$LOG_FILE" 2>&1 || true
-    firewall-cmd --permanent --add-port="$PORT_HTTPS/tcp" >>"$LOG_FILE" 2>&1 || true
+    for p in "${ports[@]}"; do
+      firewall-cmd --permanent --add-port="${p}/tcp" >>"$LOG_FILE" 2>&1 || true
+    done
     firewall-cmd --reload >>"$LOG_FILE" 2>&1 || true
-    ok "Firewalld: ports $PORT_HTTP & $PORT_HTTPS opened"
+    ok "Firewalld: ports ${ports[*]} opened"
   else
-    warn "No active firewall detected. Make sure to open ports $PORT_HTTP & $PORT_HTTPS in your cloud provider's firewall."
+    warn "No active firewall detected. Open ports ${ports[*]} in your cloud provider's firewall."
   fi
 }
 
@@ -441,6 +453,86 @@ setup_watchtower() {
   fi
 }
 
+# ── Optional DNS / SSL setup (Caddy reverse proxy) ───────────────────────
+setup_dns() {
+  local do_dns="${DOMAIN:+y}"
+
+  if [[ -z "$do_dns" ]] && (( INTERACTIVE )); then
+    echo ""
+    read -rp "$(printf "  ${CYAN}Set up a custom domain with free SSL? [y/N]: ${NC}")" do_dns
+    do_dns="${do_dns:-n}"
+  fi
+
+  if [[ "${do_dns,,}" =~ ^(y|yes)$ ]]; then
+    USE_DNS=1
+
+    # Get domain if not already set
+    if [[ -z "$DOMAIN" ]]; then
+      while true; do
+        read -rp "$(printf "  ${CYAN}Enter your domain (e.g. browser.example.com): ${NC}")" DOMAIN
+        if [[ -n "$DOMAIN" && "$DOMAIN" == *.* ]]; then
+          break
+        fi
+        warn "Please enter a valid domain name (e.g. browser.example.com)"
+      done
+    fi
+
+    log "Setting up Caddy reverse proxy for $DOMAIN …"
+
+    # Create Caddy config directory
+    local caddy_dir="/opt/caddy-browser"
+    mkdir -p "$caddy_dir/data" "$caddy_dir/config"
+
+    # Write Caddyfile — reverse proxy HTTPS to the browser's KasmVNC
+    cat > "${caddy_dir}/Caddyfile" <<CADDYEOF
+${DOMAIN} {
+    reverse_proxy 127.0.0.1:${PORT_HTTPS} {
+        transport http {
+            tls
+            tls_insecure_skip_verify
+        }
+    }
+}
+CADDYEOF
+
+    ok "Caddyfile written to ${caddy_dir}/Caddyfile"
+
+    # Remove old caddy container if exists
+    docker rm -f caddy-browser >>"$LOG_FILE" 2>&1 || true
+
+    # Open ports 80/443 for Caddy (needed for Let's Encrypt)
+    open_firewall
+
+    # Deploy Caddy
+    log "Deploying Caddy container …"
+    if docker run -d \
+      --name caddy-browser \
+      --restart unless-stopped \
+      --network host \
+      -v "${caddy_dir}/Caddyfile:/etc/caddy/Caddyfile:ro" \
+      -v "${caddy_dir}/data:/data" \
+      -v "${caddy_dir}/config:/config" \
+      caddy:2-alpine >>"$LOG_FILE" 2>&1; then
+      ok "Caddy is running — SSL will auto-provision for $DOMAIN"
+    else
+      warn "Caddy failed to deploy. You can still access via IP with self-signed cert."
+      USE_DNS=0
+      DOMAIN=""
+    fi
+
+    if (( USE_DNS )); then
+      echo ""
+      printf "  ${YELLOW}⚠  Make sure your DNS is configured:${NC}\n"
+      get_ip
+      printf "  ${BOLD}   → Add an A record: ${CYAN}%s${NC} → ${CYAN}%s${NC}\n" "$DOMAIN" "$IP"
+      printf "  ${DIM}   (at your domain registrar / Cloudflare / etc.)${NC}\n"
+      echo ""
+    fi
+  else
+    log "DNS/SSL setup skipped"
+  fi
+}
+
 # ── Wait for service to be ready ──────────────────────────────────────────
 wait_ready() {
   local waited=0
@@ -505,6 +597,13 @@ show_summary() {
   local wt_status="Disabled"
   docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "watchtower" && wt_status="Enabled (daily)"
 
+  local dns_status="Not configured"
+  local primary_url="https://${IP}:${PORT_HTTPS}"
+  if (( USE_DNS )) && [[ -n "$DOMAIN" ]]; then
+    dns_status="$DOMAIN (Caddy + Let's Encrypt)"
+    primary_url="https://${DOMAIN}"
+  fi
+
   echo ""
   printf "${GREEN}${BOLD}"
   cat <<'ART'
@@ -515,24 +614,42 @@ ART
   printf "${NC}\n"
   printf "  ${BOLD}Browser${NC}       ${GREEN}%s${NC}\n" "$BR_NAME"
   printf "  ${BOLD}Username${NC}      %s\n" "$USERNAME"
-  printf "  ${BOLD}Access URL${NC}    ${CYAN}https://%s:%s${NC}\n" "$IP" "$PORT_HTTPS"
-  printf "  ${BOLD}HTTP URL${NC}      http://%s:%s\n" "$IP" "$PORT_HTTP"
+
+  if (( USE_DNS )) && [[ -n "$DOMAIN" ]]; then
+    printf "  ${BOLD}🌐 Domain URL${NC}  ${CYAN}https://%s${NC}  ${GREEN}← use this (valid SSL)${NC}\n" "$DOMAIN"
+    printf "  ${BOLD}IP URL${NC}        ${DIM}https://%s:%s (self-signed fallback)${NC}\n" "$IP" "$PORT_HTTPS"
+  else
+    printf "  ${BOLD}Access URL${NC}    ${CYAN}https://%s:%s${NC}\n" "$IP" "$PORT_HTTPS"
+    printf "  ${BOLD}HTTP URL${NC}      http://%s:%s\n" "$IP" "$PORT_HTTP"
+  fi
+
   printf "  ${BOLD}Container${NC}     %s\n" "$CONTAINER_NAME"
   printf "  ${BOLD}Config Dir${NC}    %s\n" "$CONFIG_DIR"
   printf "  ${BOLD}Network${NC}       %s\n" "$NETWORK_MODE"
   printf "  ${BOLD}Auto-Update${NC}   %s\n" "$wt_status"
+  printf "  ${BOLD}DNS / SSL${NC}     %s\n" "$dns_status"
   printf "  ${BOLD}Timezone${NC}      %s\n" "$TZ_VAL"
   echo ""
-  printf "  ${YELLOW}⚠  Accept the self-signed SSL warning on first visit${NC}\n"
-  printf "  ${YELLOW}⚠  Open ports %s/%s in your cloud firewall if needed${NC}\n" "$PORT_HTTP" "$PORT_HTTPS"
+
+  if (( USE_DNS )) && [[ -n "$DOMAIN" ]]; then
+    printf "  ${GREEN}✓  No SSL warnings — valid certificate via Let's Encrypt${NC}\n"
+    printf "  ${YELLOW}⚠  DNS A record must point %s → %s${NC}\n" "$DOMAIN" "$IP"
+  else
+    printf "  ${YELLOW}⚠  Accept the self-signed SSL warning on first visit${NC}\n"
+  fi
+
+  printf "  ${YELLOW}⚠  Open required ports in your cloud firewall if needed${NC}\n"
   echo ""
   printf "  ${BOLD}Useful commands:${NC}\n"
-  printf "    ${DIM}docker logs -f %s${NC}       ${DIM}# live logs${NC}\n" "$CONTAINER_NAME"
-  printf "    ${DIM}docker restart %s${NC}        ${DIM}# restart${NC}\n" "$CONTAINER_NAME"
-  printf "    ${DIM}docker rm -f %s${NC}          ${DIM}# remove (re-run script to change settings)${NC}\n" "$CONTAINER_NAME"
+  printf "    ${DIM}docker logs -f %s${NC}       ${DIM}# browser logs${NC}\n" "$CONTAINER_NAME"
+  printf "    ${DIM}docker restart %s${NC}        ${DIM}# restart browser${NC}\n" "$CONTAINER_NAME"
+  if (( USE_DNS )); then
+    printf "    ${DIM}docker logs -f caddy-browser${NC}  ${DIM}# Caddy/SSL logs${NC}\n"
+  fi
+  printf "    ${DIM}docker rm -f %s${NC}          ${DIM}# remove (re-run to change settings)${NC}\n" "$CONTAINER_NAME"
   echo ""
 
-  log "Installation complete — https://$IP:$PORT_HTTPS"
+  log "Installation complete — $primary_url"
 }
 
 # ── Main ───────────────────────────────────────────────────────────────────
@@ -551,6 +668,7 @@ main() {
   open_firewall
   deploy
   setup_watchtower
+  setup_dns
   wait_ready
   show_summary
 }
