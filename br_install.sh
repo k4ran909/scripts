@@ -1,482 +1,364 @@
 #!/usr/bin/env bash
-
+# ============================================================================
+#  Browser VPS Installer v2.1
+#  One-line install: bash <(curl -fsSL https://raw.githubusercontent.com/k4ran909/scripts/main/br_install.sh)
+#
+#  Deploys a 24/7 desktop browser (KasmVNC) accessible from anywhere.
+#  Supports: Chromium, Brave, Firefox, Mullvad Browser, Opera
+# ============================================================================
 set -Eeuo pipefail
 
-SCRIPT_NAME="$(basename "$0")"
-DEFAULT_CONFIG_FILE=".browser-config"
-CONFIG_FILE="$DEFAULT_CONFIG_FILE"
+# ── Colors & formatting ────────────────────────────────────────────────────
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; MAGENTA='\033[0;35m'; BOLD='\033[1m'; DIM='\033[2m'
+NC='\033[0m'
+
+# ── Defaults ───────────────────────────────────────────────────────────────
+SCRIPT_NAME="$(basename "${BASH_SOURCE[0]:-$0}")"
+CONFIG_FILE="${CONFIG_FILE:-.browser-config}"
 EXPLICIT_CONFIG=0
 
-LOG_FILE="browser_installer_$(date +%Y%m%d_%H%M%S).log"
+LOG_FILE="browser_install_$(date +%Y%m%d_%H%M%S).log"
 CONTAINER_NAME="${CONTAINER_NAME:-browser}"
-DEFAULT_SHM_SIZE="2gb"
-IP_FETCH_TIMEOUT=5
+DEFAULT_SHM="2gb"
+PORT_HTTP="${PORT_HTTP:-${PORT_GUAC:-3000}}"
+PORT_HTTPS="${PORT_HTTPS:-3001}"
+PUID="${PUID:-1000}"
+PGID="${PGID:-1000}"
+NETWORK_MODE="${NETWORK_MODE:-bridge}"
 STARTUP_TIMEOUT=180
+IP_FETCH_TIMEOUT=5
 INTERACTIVE=0
 FAILED=0
-SERVICE_URL=""
-NETWORK_MODE="${NETWORK_MODE:-bridge}"
 
-if [[ -t 0 && -t 1 ]]; then
-  INTERACTIVE=1
-fi
+[[ -t 0 && -t 1 ]] && INTERACTIVE=1
 
-log() {
-  printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$LOG_FILE"
+# ── Logging ────────────────────────────────────────────────────────────────
+log()  { printf "${CYAN}[INFO]${NC}  %s\n" "$*" | tee -a "$LOG_FILE"; }
+ok()   { printf "${GREEN}[  OK]${NC}  %s\n" "$*" | tee -a "$LOG_FILE"; }
+warn() { printf "${YELLOW}[WARN]${NC}  %s\n" "$*" | tee -a "$LOG_FILE"; }
+die()  { FAILED=1; printf "${RED}[FAIL]${NC}  %s\n" "$*" | tee -a "$LOG_FILE" >&2; exit 1; }
+
+# ── Cleanup trap ───────────────────────────────────────────────────────────
+cleanup() {
+  local rc=$?
+  if (( rc != 0 && FAILED == 0 )); then
+    warn "Installer exited with code ${rc}. Check ${LOG_FILE} for details."
+  fi
 }
+trap cleanup EXIT
 
-error() {
-  FAILED=1
-  printf '[ERROR] %s\n' "$*" | tee -a "$LOG_FILE" >&2
-  exit 1
-}
-
-warning() {
-  printf '[WARN] %s\n' "$*" | tee -a "$LOG_FILE"
-}
-
-success() {
-  printf '[OK] %s\n' "$*" | tee -a "$LOG_FILE"
-}
-
+# ── Help ───────────────────────────────────────────────────────────────────
 show_help() {
   cat <<EOF
-Usage: $SCRIPT_NAME [config_file]
-       $SCRIPT_NAME --config /path/to/config
+${BOLD}Browser VPS Installer v2.1${NC}
 
-Options:
-  [config_file]      Path to config file (default: .browser-config)
-  -c, --config FILE  Explicit config file path
-  -h, --help         Show this help message
+${BOLD}Usage:${NC}
+  $SCRIPT_NAME                        Interactive install
+  $SCRIPT_NAME --config <file>        Use config file
+  $SCRIPT_NAME -h | --help            Show this help
 
-Supported config values:
-  BROWSER=1          1=Chromium, 2=Brave, 3=Firefox
+${BOLD}One-liner:${NC}
+  bash <(curl -fsSL https://raw.githubusercontent.com/k4ran909/scripts/main/br_install.sh)
+
+${BOLD}Config file / environment variables:${NC}
+  BROWSER=3           1=Chromium 2=Brave 3=Firefox 4=Mullvad 5=Opera
   USERNAME=browser
-  PASSWORD=strong-password
+  PASSWORD=your-password
   SHM_SIZE=2gb
-  PORT_GUAC=3000
-  PORT_HTTPS=3001
+  PORT_HTTP=3000       (HTTP / Guacamole port)
+  PORT_HTTPS=3001      (HTTPS / KasmVNC port)
   TIMEZONE=Etc/UTC
   CONFIG_DIR=/opt/browser-firefox
-  NETWORK_MODE=bridge
+  NETWORK_MODE=bridge  (bridge or host)
   PUID=1000
   PGID=1000
+  WATCHTOWER=yes       (yes or no — auto-update images)
 EOF
   exit 0
 }
 
-cleanup() {
-  local exit_code=$?
-
-  if (( exit_code != 0 && FAILED == 0 )); then
-    warning "Installer exited with status ${exit_code}. Review ${LOG_FILE} for details."
-  fi
-}
-
-trap cleanup EXIT
-
+# ── Argument parsing ───────────────────────────────────────────────────────
 parse_args() {
-  while (($#)); do
+  while (( $# )); do
     case "$1" in
-      -h|--help)
-        show_help
-        ;;
-      -c|--config)
-        shift
-        [[ $# -gt 0 ]] || error "Missing value for --config"
-        CONFIG_FILE="$1"
-        EXPLICIT_CONFIG=1
-        ;;
-      -*)
-        error "Unknown option: $1"
-        ;;
-      *)
-        if (( EXPLICIT_CONFIG )); then
-          error "Unexpected extra argument: $1"
-        fi
-        CONFIG_FILE="$1"
-        EXPLICIT_CONFIG=1
-        ;;
+      -h|--help)       show_help ;;
+      -c|--config)     shift; [[ $# -gt 0 ]] || die "Missing value for --config"
+                       CONFIG_FILE="$1"; EXPLICIT_CONFIG=1 ;;
+      -*)              die "Unknown option: $1" ;;
+      *)               CONFIG_FILE="$1"; EXPLICIT_CONFIG=1 ;;
     esac
     shift
   done
 }
 
-need_cmd() {
-  command -v "$1" >/dev/null 2>&1 || error "Required command not found: $1"
-}
-
-install_docker() {
-  local installer="/tmp/get-docker.sh"
-
-  log "Docker not found. Installing Docker with the official convenience script..."
-
-  curl -fsSL "https://get.docker.com" -o "$installer" || error "Failed to download the Docker installer"
-  sh "$installer" >>"$LOG_FILE" 2>&1 || error "Docker installation failed"
-  rm -f "$installer"
-
-  need_cmd docker
-  success "Docker installed successfully"
-}
-
-open_firewall_ports() {
-  log "Checking firewall rules for ports ${PORT_GUAC} and ${PORT_HTTPS}..."
-
-  if command -v ufw >/dev/null 2>&1; then
-    if ufw status 2>/dev/null | grep -q "^Status: active"; then
-      ufw allow "${PORT_GUAC}/tcp" >>"$LOG_FILE" 2>&1 || warning "Failed to open ${PORT_GUAC}/tcp in ufw"
-      ufw allow "${PORT_HTTPS}/tcp" >>"$LOG_FILE" 2>&1 || warning "Failed to open ${PORT_HTTPS}/tcp in ufw"
-      success "ufw rules updated"
-      return
-    fi
-  fi
-
-  if command -v firewall-cmd >/dev/null 2>&1; then
-    if firewall-cmd --state >/dev/null 2>&1; then
-      firewall-cmd --permanent --add-port="${PORT_GUAC}/tcp" >>"$LOG_FILE" 2>&1 || warning "Failed to open ${PORT_GUAC}/tcp in firewalld"
-      firewall-cmd --permanent --add-port="${PORT_HTTPS}/tcp" >>"$LOG_FILE" 2>&1 || warning "Failed to open ${PORT_HTTPS}/tcp in firewalld"
-      firewall-cmd --reload >>"$LOG_FILE" 2>&1 || warning "Failed to reload firewalld"
-      success "firewalld rules updated"
-      return
-    fi
-  fi
-
-  warning "No supported active host firewall manager detected. If your VPS provider has a cloud firewall, open TCP ports ${PORT_GUAC} and ${PORT_HTTPS} there too."
-}
-
-validate_positive_integer() {
-  local value="$1"
-  local label="$2"
-
-  [[ "$value" =~ ^[0-9]+$ ]] || error "${label} must be a positive integer"
-}
-
-validate_port() {
-  local port="$1"
-  local label="$2"
-
-  validate_positive_integer "$port" "$label"
-  (( port >= 1 && port <= 65535 )) || error "${label} must be between 1 and 65535"
-}
-
-port_in_use() {
-  local port="$1"
-
-  if command -v ss >/dev/null 2>&1; then
-    ss -ltn | awk '{print $4}' | grep -Eq "[:.]${port}$"
-    return
-  fi
-
-  if command -v netstat >/dev/null 2>&1; then
-    netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${port}$"
-    return
-  fi
-
-  return 1
-}
-
+# ── Load config file ──────────────────────────────────────────────────────
 load_config() {
-  BROWSER="${BROWSER:-}"
-  USERNAME="${USERNAME:-}"
-  PASSWORD="${PASSWORD:-}"
-  TIMEZONE="${TIMEZONE:-}"
-  SHM_SIZE="${SHM_SIZE:-$DEFAULT_SHM_SIZE}"
-  PORT_GUAC="${PORT_GUAC:-3000}"
-  PORT_HTTPS="${PORT_HTTPS:-3001}"
-  CONFIG_DIR="${CONFIG_DIR:-}"
-  DISABLE_IPV6="${DISABLE_IPV6:-}"
-  NETWORK_MODE="${NETWORK_MODE:-bridge}"
-  PUID="${PUID:-1000}"
-  PGID="${PGID:-1000}"
-
   if [[ -f "$CONFIG_FILE" ]]; then
-    log "Loading configuration from: $CONFIG_FILE"
+    log "Loading config from: $CONFIG_FILE"
     # shellcheck disable=SC1090
     source "$CONFIG_FILE"
   elif (( EXPLICIT_CONFIG )); then
-    error "Config file not found: $CONFIG_FILE"
-  else
-    log "No config file found at $CONFIG_FILE. Continuing with prompts/defaults."
+    die "Config file not found: $CONFIG_FILE"
+  fi
+}
+
+# ── Banner ─────────────────────────────────────────────────────────────────
+banner() {
+  (( INTERACTIVE )) && clear 2>/dev/null || true
+  printf "${MAGENTA}${BOLD}"
+  cat <<'ART'
+
+  ╔══════════════════════════════════════════════════╗
+  ║       🌐  Browser VPS Installer  v2.1  🌐       ║
+  ║    Deploy a 24/7 browser accessible anywhere     ║
+  ╚══════════════════════════════════════════════════╝
+
+ART
+  printf "${NC}"
+  printf "  ${DIM}Log file: %s${NC}\n\n" "$LOG_FILE"
+}
+
+# ── Root check ─────────────────────────────────────────────────────────────
+ensure_root() {
+  [[ "${EUID}" -eq 0 ]] || die "This script must run as root.  Use: sudo bash $SCRIPT_NAME"
+}
+
+# ── Install Docker if missing ─────────────────────────────────────────────
+setup_docker() {
+  log "Checking for Docker …"
+
+  if ! command -v curl &>/dev/null; then
+    die "'curl' is required but not found. Install it first: apt install curl"
   fi
 
-  BROWSER="${BROWSER:-}"
-  USERNAME="${USERNAME:-}"
-  PASSWORD="${PASSWORD:-}"
-  TIMEZONE="${TIMEZONE:-}"
-  SHM_SIZE="${SHM_SIZE:-$DEFAULT_SHM_SIZE}"
-  PORT_GUAC="${PORT_GUAC:-3000}"
-  PORT_HTTPS="${PORT_HTTPS:-3001}"
-  CONFIG_DIR="${CONFIG_DIR:-}"
-  DISABLE_IPV6="${DISABLE_IPV6:-}"
-  NETWORK_MODE="${NETWORK_MODE:-bridge}"
-  PUID="${PUID:-1000}"
-  PGID="${PGID:-1000}"
+  if ! command -v docker &>/dev/null; then
+    log "Docker not found — installing via official script …"
+    curl -fsSL https://get.docker.com -o /tmp/get-docker.sh || die "Failed to download Docker installer"
+    sh /tmp/get-docker.sh >>"$LOG_FILE" 2>&1 || die "Docker installation failed"
+    rm -f /tmp/get-docker.sh
+    command -v docker &>/dev/null || die "Docker command still not found after install"
+    ok "Docker installed"
+  else
+    ok "Docker is already installed"
+  fi
 
-  if [[ -z "$DISABLE_IPV6" && -r /proc/sys/net/ipv6/conf/all/disable_ipv6 ]]; then
-    if [[ "$(tr -d '[:space:]' </proc/sys/net/ipv6/conf/all/disable_ipv6)" == "1" ]]; then
-      DISABLE_IPV6="true"
-      log "Host IPv6 is disabled. Container IPv6 will be disabled too."
+  # Make sure daemon is running and enabled on boot
+  if ! docker info &>/dev/null; then
+    if command -v systemctl &>/dev/null; then
+      log "Starting Docker daemon …"
+      systemctl start docker &>/dev/null || die "Failed to start Docker"
+      systemctl enable docker &>/dev/null || true
+      docker info &>/dev/null || die "Docker still not responding"
+    else
+      die "Docker daemon is not running. Start it manually and re-run."
     fi
   fi
-}
 
-print_banner() {
-  if command -v clear >/dev/null 2>&1 && (( INTERACTIVE )); then
-    clear
+  # Enable on boot for 24/7 stability
+  if command -v systemctl &>/dev/null; then
+    systemctl enable docker &>/dev/null 2>&1 || true
   fi
 
-  cat <<EOF
-=======================================
-   O3DN Browser VPS Installer
-=======================================
-Log file: $LOG_FILE
-EOF
+  ok "Docker is running (enabled on boot)"
 }
 
-ensure_root() {
-  if [[ "${EUID}" -ne 0 ]]; then
-    error "This script must run as root (use: sudo $SCRIPT_NAME)"
-  fi
-}
-
-check_dependencies() {
-  log "Checking dependencies..."
-
-  need_cmd curl
-
-  if ! command -v docker >/dev/null 2>&1; then
-    install_docker
+# ── System resource check ─────────────────────────────────────────────────
+check_resources() {
+  log "Checking system resources …"
+  if command -v free &>/dev/null; then
+    local avail
+    avail="$(free -m | awk 'NR==2 {print $7}')"
+    if [[ "$avail" =~ ^[0-9]+$ ]] && (( avail < 1024 )); then
+      warn "Low memory: ${avail}MB available. Recommend at least 1GB free for stable operation."
+    else
+      ok "Memory OK (${avail}MB available)"
+    fi
   fi
 
-  success "Required commands are available"
-}
-
-ensure_docker_running() {
-  log "Checking Docker daemon..."
-
-  if docker info >/dev/null 2>&1; then
-    success "Docker is running"
-    return
-  fi
-
-  if command -v systemctl >/dev/null 2>&1; then
-    warning "Docker daemon not responding. Attempting to start docker.service..."
-    systemctl start docker >/dev/null 2>&1 || error "Failed to start Docker with systemctl"
-
-    docker info >/dev/null 2>&1 || error "Docker is still unavailable after starting docker.service"
-    success "Docker is running"
-    return
-  fi
-
-  error "Docker daemon is not available. Start Docker manually and rerun the script."
-}
-
-remove_old_container() {
-  if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
-    log "Removing old container: $CONTAINER_NAME"
-    docker rm -f "$CONTAINER_NAME" >>"$LOG_FILE" 2>&1 || warning "Could not remove existing container"
+  local disk_avail
+  disk_avail="$(df -BM / 2>/dev/null | awk 'NR==2 {gsub("M",""); print $4}' || true)"
+  if [[ "$disk_avail" =~ ^[0-9]+$ ]] && (( disk_avail < 2048 )); then
+    warn "Low disk space: ${disk_avail}MB free on /. Browser images need ~1-2GB."
   fi
 }
 
-prompt_for_browser() {
-  if [[ -n "$BROWSER" ]]; then
-    return
+# ── Browser selection ──────────────────────────────────────────────────────
+pick_browser() {
+  local choice="${BROWSER:-}"
+
+  if [[ -z "$choice" ]]; then
+    echo ""
+    printf "  ${BOLD}Select a browser to install:${NC}\n\n"
+    printf "    ${GREEN}1)${NC}  Chromium         ${DIM}— Lightweight, open-source Chrome base${NC}\n"
+    printf "    ${GREEN}2)${NC}  Brave            ${DIM}— Privacy-first, built-in ad blocker${NC}\n"
+    printf "    ${GREEN}3)${NC}  Firefox          ${DIM}— Classic, extension-rich (recommended)${NC}\n"
+    printf "    ${GREEN}4)${NC}  Mullvad Browser  ${DIM}— Tor-based maximum privacy${NC}\n"
+    printf "    ${GREEN}5)${NC}  Opera            ${DIM}— Feature-packed with free built-in VPN${NC}\n"
+    echo ""
+
+    if (( INTERACTIVE )); then
+      while true; do
+        read -rp "$(printf "  ${CYAN}Enter choice [1-5] (default 3): ${NC}")" choice
+        choice="${choice:-3}"
+        [[ "$choice" =~ ^[1-5]$ ]] && break
+        warn "Invalid input — enter a number between 1 and 5"
+      done
+    else
+      choice="3"
+      warn "Non-interactive mode → defaulting to Firefox"
+    fi
   fi
 
-  echo
-  echo "Select browser to install:"
-  echo "1) Chromium"
-  echo "2) Brave"
-  echo "3) Firefox"
-
-  if (( INTERACTIVE )); then
-    while true; do
-      read -r -p "Enter choice (1/2/3) [3]: " BROWSER
-      BROWSER="${BROWSER:-3}"
-
-      if [[ "$BROWSER" =~ ^[1-3]$ ]]; then
-        break
-      fi
-
-      warning "Invalid choice. Please enter 1, 2, or 3."
-    done
-  else
-    warning "Non-interactive mode detected. Defaulting to Firefox."
-    BROWSER="3"
-  fi
-}
-
-set_browser_image() {
-  case "$BROWSER" in
-    1)
-      IMAGE="lscr.io/linuxserver/chromium:latest"
-      NAME="Chromium"
-      BROWSER_SLUG="chromium"
-      ;;
-    2)
-      IMAGE="lscr.io/linuxserver/brave:latest"
-      NAME="Brave"
-      BROWSER_SLUG="brave"
-      ;;
-    3)
-      IMAGE="lscr.io/linuxserver/firefox:latest"
-      NAME="Firefox"
-      BROWSER_SLUG="firefox"
-      ;;
-    *)
-      error "Invalid browser choice: $BROWSER"
-      ;;
+  case "$choice" in
+    1) IMAGE="lscr.io/linuxserver/chromium:latest";        BR_NAME="Chromium";        BR_SLUG="chromium"  ;;
+    2) IMAGE="lscr.io/linuxserver/brave:latest";           BR_NAME="Brave";           BR_SLUG="brave"     ;;
+    3) IMAGE="lscr.io/linuxserver/firefox:latest";         BR_NAME="Firefox";         BR_SLUG="firefox"   ;;
+    4) IMAGE="lscr.io/linuxserver/mullvad-browser:latest"; BR_NAME="Mullvad Browser"; BR_SLUG="mullvad"   ;;
+    5) IMAGE="lscr.io/linuxserver/opera:latest";           BR_NAME="Opera";           BR_SLUG="opera"     ;;
+    *) die "Invalid browser choice: $choice" ;;
   esac
 
-  if [[ -z "$CONFIG_DIR" ]]; then
-    CONFIG_DIR="/opt/${CONTAINER_NAME}-${BROWSER_SLUG}"
-  fi
-
-  log "Selected browser: $NAME ($IMAGE)"
+  CONFIG_DIR="${CONFIG_DIR:-/opt/${CONTAINER_NAME}-${BR_SLUG}}"
+  SHM_SIZE="${SHM_SIZE:-$DEFAULT_SHM}"
+  ok "Selected: $BR_NAME"
 }
 
-configure_credentials() {
-  if [[ -z "$USERNAME" ]]; then
+# ── Credentials ────────────────────────────────────────────────────────────
+get_creds() {
+  # Username
+  if [[ -z "${USERNAME:-}" ]]; then
     if (( INTERACTIVE )); then
-      echo
-      read -r -p "Enter username [browser]: " USERNAME
+      echo ""
+      read -rp "$(printf "  ${CYAN}Username [browser]: ${NC}")" USERNAME
       USERNAME="${USERNAME:-browser}"
     else
       USERNAME="browser"
-      warning "USERNAME not provided. Using default: $USERNAME"
+      warn "USERNAME not set — using default: browser"
     fi
   fi
 
-  if [[ -z "$PASSWORD" ]]; then
+  # Password
+  if [[ -z "${PASSWORD:-}" ]]; then
     if (( INTERACTIVE )); then
-      while [[ -z "$PASSWORD" ]]; do
-        read -r -s -p "Enter password (hidden): " PASSWORD
-        echo
-
-        if [[ -z "$PASSWORD" ]]; then
-          warning "Password cannot be empty."
+      while true; do
+        read -rsp "$(printf "  ${CYAN}Password (min 6 chars, hidden): ${NC}")" PASSWORD
+        echo ""
+        if [[ ${#PASSWORD} -ge 6 ]]; then
+          break
         fi
+        warn "Password must be at least 6 characters"
       done
     else
-      error "PASSWORD must be set in the config file or environment for non-interactive runs"
+      die "PASSWORD must be set in config or environment for non-interactive mode"
     fi
   fi
 
-  (( ${#USERNAME} >= 2 )) || error "Username must be at least 2 characters"
-  (( ${#PASSWORD} >= 6 )) || error "Password must be at least 6 characters"
+  (( ${#USERNAME} >= 2 )) || die "Username must be at least 2 characters"
+  (( ${#PASSWORD} >= 6 )) || die "Password must be at least 6 characters"
 
-  log "Credentials configured: username=$USERNAME"
+  ok "Credentials configured (user: $USERNAME)"
 }
 
-detect_timezone() {
-  local detected_timezone=""
-
-  if [[ -n "$TIMEZONE" ]]; then
-    log "Timezone: $TIMEZONE"
-    return
-  fi
-
-  if command -v timedatectl >/dev/null 2>&1; then
-    detected_timezone="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
-  fi
-
-  if [[ -z "$detected_timezone" || "$detected_timezone" == "n/a" ]]; then
-    if [[ -L /etc/localtime ]]; then
-      detected_timezone="$(readlink /etc/localtime 2>/dev/null | sed 's#^.*/zoneinfo/##' || true)"
-    elif [[ -f /etc/timezone ]]; then
-      detected_timezone="$(tr -d '[:space:]' </etc/timezone)"
-    fi
-  fi
-
-  TIMEZONE="${detected_timezone:-Etc/UTC}"
-  log "Timezone: $TIMEZONE"
-}
-
-check_system_resources() {
-  local available_mem_mb=""
-
-  log "Checking system resources..."
-
-  if command -v free >/dev/null 2>&1; then
-    available_mem_mb="$(free -m | awk 'NR==2 {print $7}')"
-
-    if [[ "$available_mem_mb" =~ ^[0-9]+$ ]] && (( available_mem_mb < 2048 )); then
-      warning "Low available memory: ${available_mem_mb}MB. Browser containers work best with at least 2048MB available."
-    fi
+# ── Timezone ───────────────────────────────────────────────────────────────
+detect_tz() {
+  if [[ -n "${TIMEZONE:-}" ]]; then
+    TZ_VAL="$TIMEZONE"
   else
-    warning "'free' command not found. Skipping memory availability check."
+    TZ_VAL="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
+
+    if [[ -z "$TZ_VAL" || "$TZ_VAL" == "n/a" ]]; then
+      if [[ -L /etc/localtime ]]; then
+        TZ_VAL="$(readlink /etc/localtime 2>/dev/null | sed 's#^.*/zoneinfo/##' || true)"
+      elif [[ -f /etc/timezone ]]; then
+        TZ_VAL="$(tr -d '[:space:]' </etc/timezone)"
+      fi
+    fi
+
+    TZ_VAL="${TZ_VAL:-Etc/UTC}"
+  fi
+  log "Timezone: $TZ_VAL"
+}
+
+# ── Port validation ────────────────────────────────────────────────────────
+validate_ports() {
+  for label_port in "PORT_HTTP:$PORT_HTTP" "PORT_HTTPS:$PORT_HTTPS"; do
+    local label="${label_port%%:*}" port="${label_port##*:}"
+    [[ "$port" =~ ^[0-9]+$ ]] || die "$label must be a number (got: $port)"
+    (( port >= 1 && port <= 65535 )) || die "$label must be 1-65535 (got: $port)"
+  done
+
+  [[ "$PORT_HTTP" != "$PORT_HTTPS" ]] || die "PORT_HTTP and PORT_HTTPS must be different"
+
+  # Check if ports are already in use (skip if our container is using them)
+  local existing_container=""
+  existing_container="$(docker ps --format '{{.Names}}' --filter "name=$CONTAINER_NAME" 2>/dev/null || true)"
+
+  if [[ -z "$existing_container" ]]; then
+    for p in "$PORT_HTTP" "$PORT_HTTPS"; do
+      if command -v ss &>/dev/null; then
+        if ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${p}$"; then
+          die "Port $p is already in use by another process"
+        fi
+      elif command -v netstat &>/dev/null; then
+        if netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${p}$"; then
+          die "Port $p is already in use by another process"
+        fi
+      fi
+    done
+  fi
+
+  ok "Ports $PORT_HTTP / $PORT_HTTPS validated"
+}
+
+# ── Firewall ───────────────────────────────────────────────────────────────
+open_firewall() {
+  log "Configuring firewall …"
+
+  if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "active"; then
+    ufw allow "$PORT_HTTP/tcp" >>"$LOG_FILE" 2>&1 || true
+    ufw allow "$PORT_HTTPS/tcp" >>"$LOG_FILE" 2>&1 || true
+    ok "UFW: ports $PORT_HTTP & $PORT_HTTPS opened"
+  elif command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null 2>&1; then
+    firewall-cmd --permanent --add-port="$PORT_HTTP/tcp" >>"$LOG_FILE" 2>&1 || true
+    firewall-cmd --permanent --add-port="$PORT_HTTPS/tcp" >>"$LOG_FILE" 2>&1 || true
+    firewall-cmd --reload >>"$LOG_FILE" 2>&1 || true
+    ok "Firewalld: ports $PORT_HTTP & $PORT_HTTPS opened"
+  else
+    warn "No active firewall detected. Make sure to open ports $PORT_HTTP & $PORT_HTTPS in your cloud provider's firewall."
   fi
 }
 
-validate_runtime_settings() {
-  validate_positive_integer "$PUID" "PUID"
-  validate_positive_integer "$PGID" "PGID"
-  validate_port "$PORT_GUAC" "PORT_GUAC"
-  validate_port "$PORT_HTTPS" "PORT_HTTPS"
-
-  case "$NETWORK_MODE" in
-    bridge|host)
-      ;;
-    *)
-      error "NETWORK_MODE must be either 'bridge' or 'host'"
-      ;;
-  esac
-
-  [[ "$PORT_GUAC" != "$PORT_HTTPS" ]] || error "PORT_GUAC and PORT_HTTPS must be different"
-
-  if port_in_use "$PORT_GUAC"; then
-    error "PORT_GUAC ($PORT_GUAC) is already in use"
+# ── Deploy browser container ──────────────────────────────────────────────
+deploy() {
+  # Clean up old container
+  if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
+    log "Removing existing container: $CONTAINER_NAME …"
+    docker rm -f "$CONTAINER_NAME" >>"$LOG_FILE" 2>&1 || warn "Could not remove old container"
   fi
 
-  if port_in_use "$PORT_HTTPS"; then
-    error "PORT_HTTPS ($PORT_HTTPS) is already in use"
-  fi
-
-  [[ -n "$SHM_SIZE" ]] || error "SHM_SIZE cannot be empty"
-  [[ -n "$CONFIG_DIR" ]] || error "CONFIG_DIR cannot be empty"
-}
-
-container_ports_published() {
-  local ports_json=""
-
-  ports_json="$(docker inspect -f '{{json .NetworkSettings.Ports}}' "$CONTAINER_NAME" 2>/dev/null || true)"
-  [[ "$ports_json" == *"3000/tcp"* || "$ports_json" == *"3001/tcp"* ]]
-}
-
-pull_image() {
-  log "Pulling Docker image: $IMAGE"
-
+  # Pull image
+  log "Pulling $BR_NAME image ($IMAGE) …"
   if ! docker pull "$IMAGE" 2>&1 | tee -a "$LOG_FILE"; then
-    error "Failed to pull Docker image: $IMAGE"
+    die "Failed to pull image: $IMAGE"
   fi
+  ok "Image pulled"
 
-  success "Image pulled successfully"
-}
-
-prepare_config_directory() {
-  log "Preparing persistent config directory: $CONFIG_DIR"
-
+  # Config directory
   mkdir -p "$CONFIG_DIR"
+  chown "$PUID:$PGID" "$CONFIG_DIR" 2>/dev/null || true
 
-  if ! chown "$PUID:$PGID" "$CONFIG_DIR" >/dev/null 2>&1; then
-    warning "Could not change ownership of $CONFIG_DIR to ${PUID}:${PGID}. Container startup may fail if the directory is not writable."
-  fi
-}
+  # Build docker run args
+  echo ""
+  log "Deploying $BR_NAME container (network: $NETWORK_MODE) …"
 
-run_container() {
-  local -a docker_args
-
-  echo
-  log "Deploying $NAME browser container using network mode: $NETWORK_MODE"
-
-  docker_args=(
-    run
-    -d
+  local -a args=(
+    run -d
     --name "$CONTAINER_NAME"
     --security-opt seccomp=unconfined
     -e PUID="$PUID"
     -e PGID="$PGID"
-    -e TZ="$TIMEZONE"
+    -e TZ="$TZ_VAL"
     -e CUSTOM_USER="$USERNAME"
     -e PASSWORD="$PASSWORD"
     -v "$CONFIG_DIR:/config"
@@ -485,158 +367,192 @@ run_container() {
   )
 
   if [[ "$NETWORK_MODE" == "host" ]]; then
-    docker_args+=(--network host)
+    args+=(--network host)
   else
-    docker_args+=(
-      -p "$PORT_GUAC:3000"
-      -p "$PORT_HTTPS:3001"
-    )
+    args+=(-p "$PORT_HTTP:3000" -p "$PORT_HTTPS:3001")
   fi
 
-  if [[ -n "${DISABLE_IPV6:-}" ]]; then
-    docker_args+=(-e "DISABLE_IPV6=$DISABLE_IPV6")
+  # IPv6 handling
+  if [[ -r /proc/sys/net/ipv6/conf/all/disable_ipv6 ]]; then
+    if [[ "$(tr -d '[:space:]' </proc/sys/net/ipv6/conf/all/disable_ipv6)" == "1" ]]; then
+      args+=(-e DISABLE_IPV6=true)
+      log "Host IPv6 disabled → container IPv6 disabled too"
+    fi
   fi
 
-  docker_args+=("$IMAGE")
+  args+=("$IMAGE")
 
-  if ! docker "${docker_args[@]}" 2>&1 | tee -a "$LOG_FILE"; then
-    error "Failed to start Docker container"
+  if ! docker "${args[@]}" >>"$LOG_FILE" 2>&1; then
+    die "Failed to start container"
   fi
+  ok "Container started"
 
-  success "Container started successfully"
-
+  # Bridge fallback: if ports not published, retry with host networking
   if [[ "$NETWORK_MODE" == "bridge" ]]; then
     sleep 2
-
-    if ! container_ports_published; then
-      warning "Docker did not publish container ports on this host. Retrying with host networking."
-      docker ps -a --filter "name=${CONTAINER_NAME}" | tee -a "$LOG_FILE" || true
-      docker rm -f "$CONTAINER_NAME" >>"$LOG_FILE" 2>&1 || error "Failed to remove container before host-network retry"
+    local ports_json
+    ports_json="$(docker inspect -f '{{json .NetworkSettings.Ports}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+    if [[ "$ports_json" != *"3000/tcp"* && "$ports_json" != *"3001/tcp"* ]]; then
+      warn "Bridge networking failed to publish ports — retrying with host networking …"
+      docker rm -f "$CONTAINER_NAME" >>"$LOG_FILE" 2>&1 || die "Cannot remove container for retry"
       NETWORK_MODE="host"
-      run_container
+      deploy
       return
     fi
   fi
 }
 
-wait_for_service() {
-  local waited=0
-  local container_state=""
-  local http_code=""
+# ── Watchtower auto-updater ───────────────────────────────────────────────
+setup_watchtower() {
+  local do_wt="${WATCHTOWER:-}"
 
-  log "Waiting for browser service to become reachable (max ${STARTUP_TIMEOUT}s)..."
-
-  while (( waited < STARTUP_TIMEOUT )); do
-    container_state="$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || true)"
-
-    if [[ "$container_state" == "exited" || "$container_state" == "dead" ]]; then
-      warning "Container stopped before the web UI became ready."
-      docker ps -a --filter "name=${CONTAINER_NAME}" | tee -a "$LOG_FILE" || true
-      docker logs --tail 50 "$CONTAINER_NAME" 2>&1 | tee -a "$LOG_FILE" || true
-      error "Browser container exited during startup"
+  if [[ -z "$do_wt" ]]; then
+    if (( INTERACTIVE )); then
+      echo ""
+      read -rp "$(printf "  ${CYAN}Enable auto-updates via Watchtower? [Y/n]: ${NC}")" do_wt
+      do_wt="${do_wt:-y}"
+    else
+      do_wt="y"
     fi
+  fi
 
-    if [[ "$container_state" == "running" ]]; then
-      http_code="$(curl -kLsS -o /dev/null -w '%{http_code}' --max-time 5 "https://127.0.0.1:${PORT_HTTPS}" 2>/dev/null || true)"
-
-      if [[ -n "$http_code" && "$http_code" != "000" ]]; then
-        SERVICE_URL="https://127.0.0.1:${PORT_HTTPS}"
-        success "Browser service is responding on ${SERVICE_URL}"
-        return
-      fi
-
-      http_code="$(curl -LsS -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${PORT_GUAC}" 2>/dev/null || true)"
-
-      if [[ -n "$http_code" && "$http_code" != "000" ]]; then
-        SERVICE_URL="http://127.0.0.1:${PORT_GUAC}"
-        success "Browser service is responding on ${SERVICE_URL}"
-        return
-      fi
-    fi
-
-    sleep 2
-    waited=$((waited + 2))
-  done
-
-  warning "Browser service did not become reachable within ${STARTUP_TIMEOUT}s."
-  warning "Recent container logs:"
-  docker ps -a --filter "name=${CONTAINER_NAME}" | tee -a "$LOG_FILE" || true
-  docker port "$CONTAINER_NAME" | tee -a "$LOG_FILE" || true
-  docker logs --tail 50 "$CONTAINER_NAME" 2>&1 | tee -a "$LOG_FILE" || true
-  error "Browser UI never became reachable on localhost ports ${PORT_GUAC}/${PORT_HTTPS}"
-}
-
-get_public_ip() {
-  local candidate=""
-  local service=""
-  local services=(
-    "https://api.ipify.org"
-    "https://ifconfig.me/ip"
-    "https://icanhazip.com"
-  )
-
-  log "Retrieving public IP address..."
-
-  for service in "${services[@]}"; do
-    candidate="$(curl -fsS --max-time "$IP_FETCH_TIMEOUT" "$service" 2>/dev/null | tr -d '[:space:]' || true)"
-
-    if [[ -n "$candidate" ]]; then
-      IP="$candidate"
-      success "Public IP: $IP"
+  if [[ "${do_wt,,}" =~ ^(y|yes)$ ]]; then
+    if docker ps --format '{{.Names}}' | grep -qx "watchtower"; then
+      ok "Watchtower is already running"
       return
     fi
+
+    # Remove stopped watchtower if exists
+    docker rm -f watchtower >>"$LOG_FILE" 2>&1 || true
+
+    log "Deploying Watchtower (auto-updates every 24h) …"
+    if docker run -d \
+      --name watchtower \
+      --restart unless-stopped \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      containrrr/watchtower \
+      --cleanup --interval 86400 >>"$LOG_FILE" 2>&1; then
+      ok "Watchtower active — browser image will auto-update daily"
+    else
+      warn "Watchtower failed to deploy (non-critical — browser still works)"
+    fi
+  else
+    log "Watchtower skipped"
+  fi
+}
+
+# ── Wait for service to be ready ──────────────────────────────────────────
+wait_ready() {
+  local waited=0
+  log "Waiting for $BR_NAME to become ready (max ${STARTUP_TIMEOUT}s) …"
+
+  while (( waited < STARTUP_TIMEOUT )); do
+    local state
+    state="$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+
+    if [[ "$state" == "exited" || "$state" == "dead" ]]; then
+      warn "Container died during startup. Last 30 log lines:"
+      docker logs --tail 30 "$CONTAINER_NAME" 2>&1 | tee -a "$LOG_FILE" || true
+      die "Container exited before becoming ready"
+    fi
+
+    if [[ "$state" == "running" ]]; then
+      # Try HTTPS first, then HTTP
+      local code
+      code="$(curl -kLsS -o /dev/null -w '%{http_code}' --max-time 5 "https://127.0.0.1:${PORT_HTTPS}" 2>/dev/null || true)"
+      if [[ -n "$code" && "$code" != "000" ]]; then
+        ok "Service is live on HTTPS port $PORT_HTTPS"
+        return
+      fi
+
+      code="$(curl -LsS -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${PORT_HTTP}" 2>/dev/null || true)"
+      if [[ -n "$code" && "$code" != "000" ]]; then
+        ok "Service is live on HTTP port $PORT_HTTP"
+        return
+      fi
+    fi
+
+    sleep 3
+    waited=$((waited + 3))
+    # Progress indicator every 15 seconds
+    if (( waited % 15 == 0 )); then
+      printf "  ${DIM}… still waiting (%ds / %ds)${NC}\n" "$waited" "$STARTUP_TIMEOUT"
+    fi
   done
 
-  IP="localhost"
-  warning "Could not retrieve public IP. Using '${IP}' instead."
+  warn "Service did not respond within ${STARTUP_TIMEOUT}s. Dumping diagnostics:"
+  docker ps -a --filter "name=${CONTAINER_NAME}" 2>&1 | tee -a "$LOG_FILE" || true
+  docker port "$CONTAINER_NAME" 2>&1 | tee -a "$LOG_FILE" || true
+  docker logs --tail 50 "$CONTAINER_NAME" 2>&1 | tee -a "$LOG_FILE" || true
+  die "Browser never became reachable on ports ${PORT_HTTP}/${PORT_HTTPS}"
 }
 
-show_results() {
-  echo
-  echo "======================================="
-  success "Installation complete"
-  echo "======================================="
-  echo "Browser      : $NAME"
-  echo "Username     : $USERNAME"
-  echo "HTTP URL     : http://$IP:$PORT_GUAC"
-  echo "Access URL   : https://$IP:$PORT_HTTPS"
-  echo "Guac Port    : $PORT_GUAC"
-  echo "Timezone     : $TIMEZONE"
-  echo "Config Dir   : $CONFIG_DIR"
-  echo "Container    : $CONTAINER_NAME"
-  echo "Network Mode : $NETWORK_MODE"
-  echo
-  echo "Note: Accept the browser SSL warning on first load."
-  echo "Log file     : $LOG_FILE"
-  echo "======================================="
-
-  log "Installation completed successfully"
-  log "Container name: $CONTAINER_NAME"
-  log "Access: https://$IP:$PORT_HTTPS"
+# ── Get public IP ─────────────────────────────────────────────────────────
+get_ip() {
+  local svc
+  for svc in "https://api.ipify.org" "https://ifconfig.me/ip" "https://icanhazip.com"; do
+    IP="$(curl -fsS --max-time "$IP_FETCH_TIMEOUT" "$svc" 2>/dev/null | tr -d '[:space:]' || true)"
+    [[ -n "$IP" ]] && return
+  done
+  IP="<your-server-ip>"
+  warn "Could not auto-detect public IP"
 }
 
+# ── Final summary ─────────────────────────────────────────────────────────
+show_summary() {
+  get_ip
+
+  local wt_status="Disabled"
+  docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "watchtower" && wt_status="Enabled (daily)"
+
+  echo ""
+  printf "${GREEN}${BOLD}"
+  cat <<'ART'
+  ╔══════════════════════════════════════════════════╗
+  ║          ✅  Installation Complete!              ║
+  ╚══════════════════════════════════════════════════╝
+ART
+  printf "${NC}\n"
+  printf "  ${BOLD}Browser${NC}       ${GREEN}%s${NC}\n" "$BR_NAME"
+  printf "  ${BOLD}Username${NC}      %s\n" "$USERNAME"
+  printf "  ${BOLD}Access URL${NC}    ${CYAN}https://%s:%s${NC}\n" "$IP" "$PORT_HTTPS"
+  printf "  ${BOLD}HTTP URL${NC}      http://%s:%s\n" "$IP" "$PORT_HTTP"
+  printf "  ${BOLD}Container${NC}     %s\n" "$CONTAINER_NAME"
+  printf "  ${BOLD}Config Dir${NC}    %s\n" "$CONFIG_DIR"
+  printf "  ${BOLD}Network${NC}       %s\n" "$NETWORK_MODE"
+  printf "  ${BOLD}Auto-Update${NC}   %s\n" "$wt_status"
+  printf "  ${BOLD}Timezone${NC}      %s\n" "$TZ_VAL"
+  echo ""
+  printf "  ${YELLOW}⚠  Accept the self-signed SSL warning on first visit${NC}\n"
+  printf "  ${YELLOW}⚠  Open ports %s/%s in your cloud firewall if needed${NC}\n" "$PORT_HTTP" "$PORT_HTTPS"
+  echo ""
+  printf "  ${BOLD}Useful commands:${NC}\n"
+  printf "    ${DIM}docker logs -f %s${NC}       ${DIM}# live logs${NC}\n" "$CONTAINER_NAME"
+  printf "    ${DIM}docker restart %s${NC}        ${DIM}# restart${NC}\n" "$CONTAINER_NAME"
+  printf "    ${DIM}docker rm -f %s${NC}          ${DIM}# remove (re-run script to change settings)${NC}\n" "$CONTAINER_NAME"
+  echo ""
+
+  log "Installation complete — https://$IP:$PORT_HTTPS"
+}
+
+# ── Main ───────────────────────────────────────────────────────────────────
 main() {
   parse_args "$@"
-  print_banner
-  log "Installation started"
+  banner
+  log "Installation started ($(date))"
   ensure_root
-  check_dependencies
-  ensure_docker_running
   load_config
-  prompt_for_browser
-  set_browser_image
-  configure_credentials
-  detect_timezone
-  check_system_resources
-  validate_runtime_settings
-  open_firewall_ports
-  remove_old_container
-  pull_image
-  prepare_config_directory
-  run_container
-  wait_for_service
-  get_public_ip
-  show_results
+  setup_docker
+  check_resources
+  pick_browser
+  get_creds
+  detect_tz
+  validate_ports
+  open_firewall
+  deploy
+  setup_watchtower
+  wait_ready
+  show_summary
 }
 
 main "$@"
