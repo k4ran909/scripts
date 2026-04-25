@@ -430,11 +430,17 @@ open_firewall() {
 
 # ── Deploy browser container ──────────────────────────────────────────────
 deploy() {
-  # Clean up old container
-  if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
-    log "Removing existing container: $CONTAINER_NAME …"
-    docker rm -f "$CONTAINER_NAME" >>"$LOG_FILE" 2>&1 || warn "Could not remove old container"
-  fi
+  # Clean up ALL related containers before deploying
+  local old_containers=("$CONTAINER_NAME" "caddy-browser")
+  for c in "${old_containers[@]}"; do
+    if docker ps -a --format '{{.Names}}' | grep -qx "$c"; then
+      log "Removing existing container: $c …"
+      docker rm -f "$c" >>"$LOG_FILE" 2>&1 || warn "Could not remove $c"
+    fi
+  done
+
+  # Wait for Docker to fully release ports
+  sleep 2
 
   # Pull image
   log "Pulling $BR_NAME image ($IMAGE) …"
@@ -481,9 +487,33 @@ deploy() {
 
   args+=("$IMAGE")
 
-  if ! docker "${args[@]}" >>"$LOG_FILE" 2>&1; then
-    die "Failed to start container"
-  fi
+  # Run and SHOW errors instead of hiding them
+  local docker_output
+  docker_output="$(docker "${args[@]}" 2>&1)" || {
+    echo "$docker_output" | tee -a "$LOG_FILE"
+    warn "Docker error shown above ↑"
+
+    # Common fix: if it's a name conflict, force remove and retry once
+    if echo "$docker_output" | grep -qi "already in use\|Conflict"; then
+      warn "Name conflict detected — force removing and retrying …"
+      docker rm -f "$CONTAINER_NAME" >>"$LOG_FILE" 2>&1 || true
+      sleep 2
+      docker_output="$(docker "${args[@]}" 2>&1)" || {
+        echo "$docker_output" | tee -a "$LOG_FILE"
+        die "Failed to start container after retry"
+      }
+    # Port bind error: offer to retry with host networking
+    elif echo "$docker_output" | grep -qi "port is already allocated\|bind"; then
+      warn "Port bind failed — retrying with host networking …"
+      NETWORK_MODE="host"
+      deploy
+      return
+    else
+      die "Failed to start container"
+    fi
+  }
+
+  echo "$docker_output" >> "$LOG_FILE"
   ok "Container started"
 
   # Bridge fallback: if ports not published, retry with host networking
