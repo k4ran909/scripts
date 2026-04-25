@@ -284,32 +284,119 @@ detect_tz() {
   log "Timezone: $TZ_VAL"
 }
 
+# ── Port helpers ───────────────────────────────────────────────────────────
+is_port_busy() {
+  local port="$1"
+  if command -v ss &>/dev/null; then
+    ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${port}$" && return 0
+  elif command -v netstat &>/dev/null; then
+    netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${port}$" && return 0
+  fi
+  return 1
+}
+
+find_free_ports() {
+  # Find open ports near the given starting port
+  local start="$1" count="${2:-5}" found=0
+  local -a results=()
+  local candidate
+
+  for (( candidate = start; candidate <= 65535 && found < count; candidate++ )); do
+    if ! is_port_busy "$candidate"; then
+      results+=("$candidate")
+      (( found++ ))
+    fi
+  done
+
+  echo "${results[*]}"
+}
+
+prompt_port() {
+  local label="$1" current="$2"
+  local new_port=""
+
+  if ! is_port_busy "$current"; then
+    return 0  # port is free, nothing to do
+  fi
+
+  # Port is busy — find alternatives
+  local free_list
+  free_list="$(find_free_ports "$current" 6)"
+  local -a suggestions=($free_list)
+
+  echo ""
+  warn "Port $current ($label) is already in use!"
+  printf "  ${BOLD}Available ports nearby:${NC}\n"
+
+  local i=1
+  for sp in "${suggestions[@]}"; do
+    printf "    ${GREEN}%d)${NC}  %s\n" "$i" "$sp"
+    (( i++ ))
+  done
+  echo ""
+
+  if (( INTERACTIVE )); then
+    while true; do
+      read -rp "$(printf "  ${CYAN}Pick a number [1-%d] or type a custom port: ${NC}" "${#suggestions[@]}")" new_port
+
+      # If they typed a number matching a suggestion index
+      if [[ "$new_port" =~ ^[0-9]+$ ]] && (( new_port >= 1 && new_port <= ${#suggestions[@]} )); then
+        new_port="${suggestions[$((new_port - 1))]}"
+      fi
+
+      # Validate the chosen port
+      if [[ "$new_port" =~ ^[0-9]+$ ]] && (( new_port >= 1 && new_port <= 65535 )); then
+        if is_port_busy "$new_port"; then
+          warn "Port $new_port is also in use. Pick another."
+          continue
+        fi
+        break
+      fi
+      warn "Invalid port. Enter a number 1-65535."
+    done
+  else
+    # Non-interactive: auto-pick first free port
+    new_port="${suggestions[0]}"
+    warn "Auto-selected port $new_port for $label (non-interactive mode)"
+  fi
+
+  # Update the global variable
+  if [[ "$label" == "HTTP" ]]; then
+    PORT_HTTP="$new_port"
+  else
+    PORT_HTTPS="$new_port"
+  fi
+  ok "$label port set to $new_port"
+}
+
 # ── Port validation ────────────────────────────────────────────────────────
 validate_ports() {
+  # Basic format validation
   for label_port in "PORT_HTTP:$PORT_HTTP" "PORT_HTTPS:$PORT_HTTPS"; do
     local label="${label_port%%:*}" port="${label_port##*:}"
     [[ "$port" =~ ^[0-9]+$ ]] || die "$label must be a number (got: $port)"
     (( port >= 1 && port <= 65535 )) || die "$label must be 1-65535 (got: $port)"
   done
 
-  [[ "$PORT_HTTP" != "$PORT_HTTPS" ]] || die "PORT_HTTP and PORT_HTTPS must be different"
-
-  # Check if ports are already in use (skip if our container is using them)
+  # Skip port-in-use checks if our own container already owns them
   local existing_container=""
   existing_container="$(docker ps --format '{{.Names}}' --filter "name=$CONTAINER_NAME" 2>/dev/null || true)"
 
   if [[ -z "$existing_container" ]]; then
-    for p in "$PORT_HTTP" "$PORT_HTTPS"; do
-      if command -v ss &>/dev/null; then
-        if ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${p}$"; then
-          die "Port $p is already in use by another process"
-        fi
-      elif command -v netstat &>/dev/null; then
-        if netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${p}$"; then
-          die "Port $p is already in use by another process"
-        fi
-      fi
-    done
+    prompt_port "HTTP"  "$PORT_HTTP"
+    prompt_port "HTTPS" "$PORT_HTTPS"
+  fi
+
+  # Final sanity: they must be different
+  if [[ "$PORT_HTTP" == "$PORT_HTTPS" ]]; then
+    warn "HTTP and HTTPS ports are the same ($PORT_HTTP) — bumping HTTPS by 1"
+    PORT_HTTPS=$(( PORT_HTTP + 1 ))
+    if is_port_busy "$PORT_HTTPS"; then
+      local alt
+      alt="$(find_free_ports "$PORT_HTTPS" 1)"
+      PORT_HTTPS="$alt"
+    fi
+    ok "Adjusted HTTPS port to $PORT_HTTPS"
   fi
 
   ok "Ports $PORT_HTTP / $PORT_HTTPS validated"
