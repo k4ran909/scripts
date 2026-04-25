@@ -570,15 +570,10 @@ setup_dns() {
     local caddy_dir="/opt/caddy-browser"
     mkdir -p "$caddy_dir/data" "$caddy_dir/config"
 
-    # Write Caddyfile — reverse proxy HTTPS to the browser's KasmVNC
+    # Write Caddyfile — Caddy handles SSL, proxies to browser's HTTP port
     cat > "${caddy_dir}/Caddyfile" <<CADDYEOF
 ${DOMAIN} {
-    reverse_proxy 127.0.0.1:${PORT_HTTPS} {
-        transport http {
-            tls
-            tls_insecure_skip_verify
-        }
-    }
+    reverse_proxy 127.0.0.1:${PORT_HTTP}
 }
 CADDYEOF
 
