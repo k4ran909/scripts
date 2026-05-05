@@ -14,15 +14,16 @@ Deploy a high-performance Telegram proxy on your VPS in **one command**. Get fas
 bash <(curl -fsSL https://raw.githubusercontent.com/k4ran909/scripts/main/telegram_proxy.sh)
 ```
 
-> Run as root on your VPS (Ubuntu/Debian). That's it!
+> Run as root on your VPS (Ubuntu/Debian). That's it! Supports both **AMD64** and **ARM64** servers.
 
 ### What it does
 
-- 🐳 Installs Docker (if needed)
-- 🚀 Deploys official Telegram MTProto proxy on port 443
-- 🔐 FakeTLS obfuscation (looks like normal HTTPS — no throttling)
-- ⚡ Enables BBR congestion control + TCP buffer optimization
-- 🔗 Prints a `tg://` link you can tap on your phone to connect instantly
+- 📦 Downloads native `mtg v2` binary (no Docker needed)
+- 🔐 FakeTLS obfuscation (traffic looks like google.com HTTPS)
+- ⚡ BBR congestion control + TCP buffer optimization
+- 🔍 Auto-detects free port (tries 443 → 8443 → 2053 → 8880)
+- 🔗 Prints a `tg://` link you can tap on your phone to connect
+- 🔄 Runs as a systemd service (auto-start on reboot)
 - 📦 Installs `tgproxy` command for easy management
 
 ### Management
@@ -30,11 +31,12 @@ bash <(curl -fsSL https://raw.githubusercontent.com/k4ran909/scripts/main/telegr
 After install, use the `tgproxy` command:
 
 ```bash
-tgproxy status      # Check if running
+tgproxy status      # Check if running + active connections
 tgproxy info        # Get connection link
 tgproxy restart     # Restart proxy
 tgproxy logs        # View logs
-tgproxy update      # Update to latest
+tgproxy follow      # Live tail logs
+tgproxy update      # Update mtg binary
 tgproxy speedtest   # Test VPS speed
 tgproxy uninstall   # Remove everything
 ```
