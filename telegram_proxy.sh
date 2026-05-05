@@ -161,10 +161,24 @@ install_mtg() {
 # ── Generate FakeTLS secret ──────────────────────────────────
 generate_secret() {
     mkdir -p "$CONFIG_DIR"
+    local need_new=false
+
     if [ -f "$SECRET_FILE" ]; then
         SECRET=$(cat "$SECRET_FILE")
-        ok "Using existing secret"
+        # Validate: mtg v2 FakeTLS secrets must start with 'ee'
+        if [[ "$SECRET" == ee* ]] && [ ${#SECRET} -gt 32 ]; then
+            ok "Using existing secret (valid FakeTLS format)"
+        else
+            warn "Old/invalid secret detected — regenerating for mtg v2"
+            # Backup the old one just in case
+            mv "$SECRET_FILE" "${SECRET_FILE}.old" 2>/dev/null || true
+            need_new=true
+        fi
     else
+        need_new=true
+    fi
+
+    if [ "$need_new" = true ]; then
         info "Generating FakeTLS secret..."
         SECRET=$("$MTG_BIN" generate-secret --hex tls -t "$FAKETLS_DOMAIN")
         echo "$SECRET" > "$SECRET_FILE"
