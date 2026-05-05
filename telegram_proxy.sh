@@ -180,7 +180,7 @@ generate_secret() {
 
     if [ "$need_new" = true ]; then
         info "Generating FakeTLS secret..."
-        SECRET=$("$MTG_BIN" generate-secret --hex tls -t "$FAKETLS_DOMAIN")
+        SECRET=$("$MTG_BIN" generate-secret --hex tls "$FAKETLS_DOMAIN")
         echo "$SECRET" > "$SECRET_FILE"
         chmod 600 "$SECRET_FILE"
         ok "Generated FakeTLS secret (disguised as ${FAKETLS_DOMAIN})"
