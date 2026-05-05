@@ -125,7 +125,7 @@ install_mtg() {
 
     if [ -f "$MTG_BIN" ]; then
         local current_ver
-        current_ver=$("$MTG_BIN" --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' || echo "unknown")
+        current_ver=$("$MTG_BIN" --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "unknown")
         if [ "$current_ver" = "$MTG_VERSION" ]; then
             ok "mtg v${MTG_VERSION} already installed"
             return
@@ -180,7 +180,7 @@ generate_secret() {
 
     if [ "$need_new" = true ]; then
         info "Generating FakeTLS secret..."
-        SECRET=$("$MTG_BIN" generate-secret -x "$FAKETLS_DOMAIN")
+        SECRET=$("$MTG_BIN" generate-secret "$FAKETLS_DOMAIN" -x)
         echo "$SECRET" > "$SECRET_FILE"
         chmod 600 "$SECRET_FILE"
         ok "Generated FakeTLS secret (disguised as ${FAKETLS_DOMAIN})"
