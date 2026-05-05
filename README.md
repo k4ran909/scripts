@@ -1,57 +1,51 @@
-# 🛠️ Scripts
+# 🛠️ VPS Scripts
 
-Collection of VPS utility scripts.
+Quick one-liner scripts for VPS setup.
 
 ---
 
-## ✈️ Telegram MTProto Proxy
+## Script 1 — ✈️ Telegram MTProto Proxy
 
-Deploy a high-performance Telegram proxy on your VPS in **one command**. Get faster downloads by routing Telegram traffic through your nearby VPS (Mumbai / Singapore).
+Fast Telegram proxy using [mtg v2](https://github.com/9seconds/mtg). Supports **AMD64 + ARM64**.
 
-### ⚡ One-Line Install
+### Install
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/k4ran909/scripts/main/telegram_proxy.sh)
 ```
 
-> Run as root on your VPS (Ubuntu/Debian). That's it! Supports both **AMD64** and **ARM64** servers.
-
 ### What it does
 
-- 📦 Downloads native `mtg v2` binary (no Docker needed)
-- 🔐 FakeTLS obfuscation (traffic looks like google.com HTTPS)
-- ⚡ BBR congestion control + TCP buffer optimization
-- 🔍 Auto-detects free port (tries 443 → 8443 → 2053 → 8880)
-- 🔗 Prints a `tg://` link you can tap on your phone to connect
-- 🔄 Runs as a systemd service (auto-start on reboot)
-- 📦 Installs `tgproxy` command for easy management
+1. Downloads `mtg v2.2.8` binary (auto-detects arch)
+2. Generates FakeTLS secret (traffic looks like google.com)
+3. Finds a free port (443 → 8443 → 2053 → 8880)
+4. Applies BBR + TCP optimizations
+5. Creates systemd service (auto-start on reboot)
+6. Installs `tgproxy` management command
+7. Prints `tg://` link — tap on phone to connect
 
-### Management
-
-After install, use the `tgproxy` command:
+### Manage
 
 ```bash
-tgproxy status      # Check if running + active connections
-tgproxy info        # Get connection link
-tgproxy restart     # Restart proxy
-tgproxy logs        # View logs
-tgproxy follow      # Live tail logs
-tgproxy update      # Update mtg binary
-tgproxy speedtest   # Test VPS speed
-tgproxy uninstall   # Remove everything
+tgproxy status       # running? connections?
+tgproxy info         # connection link
+tgproxy restart      # restart proxy
+tgproxy logs         # view logs
+tgproxy doctor       # connectivity check
+tgproxy update       # update binary
+tgproxy speedtest    # test VPS speed
+tgproxy uninstall    # remove everything
 ```
 
-### Connect from Telegram
+### Connect
 
-1. Run the installer → it prints a `tg://proxy?server=...` link
-2. **Tap the link on your phone** → Telegram auto-configures
-3. Or manually: **Settings → Data & Storage → Proxy → Add Proxy → MTProto**
+After install → tap the `tg://` link on your phone.
+
+Or manually: **Telegram → Settings → Data & Storage → Proxy → MTProto**
 
 ---
 
-## 🌐 Browser Install (`br_install.sh`)
-
-Install a headless browser environment on VPS.
+## Script 2 — 🌐 Browser Install
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/k4ran909/scripts/main/br_install.sh)
