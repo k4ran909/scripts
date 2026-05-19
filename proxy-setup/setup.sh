@@ -139,16 +139,37 @@ net.ipv4.icmp_echo_ignore_broadcasts = 1
 net.ipv4.icmp_ignore_bogus_error_responses = 1
 # Log suspicious packets
 net.ipv4.conf.all.log_martians = 1
-# BBR congestion + TCP tuning
+# ── BBR congestion control (critical for long-distance) ──
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
+# ── TCP Fast Open (saves 1 RTT on connections) ──
 net.ipv4.tcp_fastopen = 3
-net.core.rmem_max = 16777216
-net.core.wmem_max = 16777216
-net.ipv4.tcp_rmem = 4096 87380 16777216
-net.ipv4.tcp_wmem = 4096 65536 16777216
+# ── Large TCP buffers (essential for high-latency links) ──
+net.core.rmem_max = 33554432
+net.core.wmem_max = 33554432
+net.core.rmem_default = 1048576
+net.core.wmem_default = 1048576
+net.ipv4.tcp_rmem = 4096 1048576 33554432
+net.ipv4.tcp_wmem = 4096 1048576 33554432
+# ── Window scaling (must be ON for long-distance) ──
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_adv_win_scale = 1
+# ── Reduce latency: enable timestamps for RTT estimation ──
+net.ipv4.tcp_timestamps = 1
+# ── Enable SACK for packet loss recovery (less retransmit) ──
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_dsack = 1
+net.ipv4.tcp_fack = 1
+# ── Connection handling ──
 net.core.somaxconn = 4096
 net.ipv4.tcp_tw_reuse = 1
+net.core.netdev_max_backlog = 5000
+# ── Reduce keepalive overhead ──
+net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_keepalive_probes = 5
+# ── Connection tracking optimization ──
+net.netfilter.nf_conntrack_max = 131072
 # IP forwarding for VPN
 net.ipv4.ip_forward = 1
 EOF
@@ -240,7 +261,8 @@ services:
       - WG_PORT=${WG_PORT}
       - WG_DEFAULT_DNS=172.20.0.100
       - WG_ALLOWED_IPS=0.0.0.0/0,::/0
-      - WG_PERSISTENT_KEEPALIVE=25
+      - WG_PERSISTENT_KEEPALIVE=15
+      - WG_MTU=1280
       - UI_TRAFFIC_STATS=true
       - UI_CHART_TYPE=2
     volumes:
