@@ -9,6 +9,10 @@
 
 set -euo pipefail
 
+# ── Force non-interactive mode (no dialogs/prompts) ──────────
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+
 # ── Colors ───────────────────────────────────────────────────
 R='\033[0;31m' G='\033[0;32m' Y='\033[1;33m' C='\033[0;36m' B='\033[1m' N='\033[0m'
 
