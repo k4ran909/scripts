@@ -255,17 +255,31 @@ chmod 600 "${DEPLOY}/3proxy/3proxy.cfg"
 echo -e "${G}  ✓ 3proxy config created (SOCKS5:1080, HTTP:3128)${N}"
 
 # ── Docker Compose ───────────────────────────────────────────
+# Generate bcrypt hash for wg-easy password
+echo -e "${Y}→ Generating password hash for wg-easy...${N}"
+WG_HASH=$(docker run --rm ghcr.io/wg-easy/wg-easy wgpw "${WG_UI_PASS}" 2>/dev/null | tail -1 || true)
+if [ -z "$WG_HASH" ]; then
+    # Fallback: use older wg-easy version that accepts plain password
+    WG_IMAGE="ghcr.io/wg-easy/wg-easy:14"
+    WG_PASS_ENV="PASSWORD=${WG_UI_PASS}"
+    echo -e "${Y}  → Using wg-easy v14 (plain password mode)${N}"
+else
+    WG_IMAGE="ghcr.io/wg-easy/wg-easy:latest"
+    WG_PASS_ENV="PASSWORD_HASH=${WG_HASH}"
+    echo -e "${G}  ✓ Password hash generated${N}"
+fi
+
 cat > "${DEPLOY}/docker-compose.yml" << DCOMPOSE
 services:
   wg-easy:
-    image: ghcr.io/wg-easy/wg-easy:latest
+    image: ${WG_IMAGE}
     container_name: wg-easy
     environment:
       - LANG=en
       - WG_HOST=${SERVER_IP}
-      - PASSWORD=${WG_UI_PASS}
+      - ${WG_PASS_ENV}
       - WG_PORT=${WG_PORT}
-      - WG_DEFAULT_DNS=172.20.0.100
+      - WG_DEFAULT_DNS=1.1.1.1,1.0.0.1
       - WG_ALLOWED_IPS=0.0.0.0/0,::/0
       - WG_PERSISTENT_KEEPALIVE=15
       - WG_MTU=1280
@@ -282,40 +296,18 @@ services:
     sysctls:
       - net.ipv4.ip_forward=1
       - net.ipv4.conf.all.src_valid_mark=1
-    networks:
-      proxy-net:
-        ipv4_address: 172.20.0.10
     restart: unless-stopped
 
   proxy:
     image: 3proxy/3proxy:latest
     container_name: proxy-server
     volumes:
-      - ./3proxy/3proxy.cfg:/etc/3proxy/cfg/3proxy.cfg:ro
+      - ./3proxy/3proxy.cfg:/conf/3proxy.cfg:ro
     ports:
       - "${SOCKS5_PORT}:1080"
       - "${HTTP_PORT}:3128"
-    networks:
-      proxy-net:
-        ipv4_address: 172.20.0.20
     restart: unless-stopped
 
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    container_name: cloudflared-dns
-    command: proxy-dns --port 53 --upstream https://1.1.1.1/dns-query --upstream https://1.0.0.1/dns-query
-    networks:
-      proxy-net:
-        ipv4_address: 172.20.0.100
-    restart: unless-stopped
-
-networks:
-  proxy-net:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.20.0.0/24
-          gateway: 172.20.0.1
 DCOMPOSE
 echo -e "${G}  ✓ Docker Compose file created${N}"
 
@@ -335,7 +327,7 @@ sleep 5
 echo -e "\n${B}${C}━━━ Step 7/7: Health Check ━━━${N}"
 
 ALL_OK=true
-for svc in wg-easy proxy-server cloudflared-dns; do
+for svc in wg-easy proxy-server; do
     if docker ps --format '{{.Names}}' | grep -q "^${svc}$"; then
         echo -e "  ${G}✓${N} ${svc}: ${G}running${N}"
     else
@@ -376,7 +368,7 @@ echo -e "${C}║${N}  ${G}SOCKS5 Proxy:${N}  ${Y}${SERVER_IP}:${SOCKS5_PORT}${N}
 echo -e "${C}║${N}  ${G}HTTP Proxy:${N}    ${Y}${SERVER_IP}:${HTTP_PORT}${N}"
 echo -e "${C}║${N}  ${G}Auth:${N}          ${Y}${PROXY_USER} / ${PROXY_PASS}${N}"
 echo -e "${C}║${N}"
-echo -e "${C}║${N}  ${G}DNS:${N}           ${Y}Cloudflare DoH (auto for VPN clients)${N}"
+echo -e "${C}║${N}  ${G}DNS:${N}           ${Y}Cloudflare (1.1.1.1) via WireGuard${N}"
 echo -e "${C}║${N}"
 echo -e "${C}╠══════════════════════════════════════════════════════════╣${N}"
 echo -e "${C}║${N}  ${B}📱 Connect your devices:${N}"
